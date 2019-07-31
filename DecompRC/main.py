@@ -47,6 +47,7 @@ logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(messa
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "start_logits", "end_logits", "switch"])
@@ -54,7 +55,7 @@ RawResult = collections.namedtuple("RawResult",
 
 def main():
     parser = argparse.ArgumentParser()
-    BERT_DIR = "/home/sewon/for-inference/model/uncased_L-12_H-768_A-12/"
+    BERT_DIR = "model/uncased_L-12_H-768_A-12/"
     ## Required parameters
     parser.add_argument("--bert_config_file", default=BERT_DIR+"bert_config.json", \
                         type=str, help="The config json file corresponding to the pre-trained BERT model. "
@@ -298,7 +299,9 @@ def main():
         stop_training = False
 
         for epoch in range(int(args.num_train_epochs)):
-            for step, batch in tqdm(enumerate(train_dataloader)):
+            tr_loss = 0
+            tqdm_bar = tqdm(train_dataloader, desc="Training", disable=args.local_rank not in [-1, 0])
+            for step, batch in enumerate(tqdm_bar):
                 global_step += 1
                 batch = [t.to(device) for t in batch]
                 loss = model(batch, global_step)
@@ -307,9 +310,12 @@ def main():
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
                 loss.backward()
+                tr_loss += loss.item()
                 if global_step % args.gradient_accumulation_steps == 0:
                     optimizer.step()    # We have accumulated enought gradients
                     model.zero_grad()
+                    tqdm_bar.desc = "Epoch training loss: {:.2e} lr: {:.2e}".format(tr_loss / (step + 1),
+                                                                                    optimizer.get_lr()[0])
                 if global_step % args.eval_period == 0:
                     model.eval()
                     f1 =  predict(args, model, eval_dataloader, eval_examples, eval_features, \
@@ -329,6 +335,8 @@ def main():
                         if best_f1 > 0.1 and wait_step == args.wait_step:
                             stop_training = True
                     model.train()
+            logger.info("Training loss %.5f (epoch=%d)" % (tr_loss / (step + 1), epoch))
+            logger.info("Best %s: %.3f up to epoch=%d" % (metric_name, best_f1*100.0, epoch))
             if stop_training:
                 break
 

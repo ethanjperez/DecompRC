@@ -183,8 +183,7 @@ def read_squad_examples(logger, input_file, subqueries_file, is_training, debug,
         input_data = _input_data
 
     if only_comp:
-        with open('/home/sewon/data/hotpotqa/hotpot_{}_v1.json'.format( \
-                                    'train' if is_training else 'dev_distractor'), 'r') as f:
+        with open('data/hotpotqa/hotpot_{}_v1.json'.format('train' if is_training else 'dev_distractor'), 'r') as f:
             orig_data = json.load(f)
             id2type = {entry['_id'].split('-')[0]:entry['type'] for entry in orig_data}
             id2type.update({k+"-inv":v for k, v in id2type.items()})
@@ -769,8 +768,8 @@ def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
                 unique_id += 1
 
         return features, counter_n_answers, truncated
-    outputs = Parallel(n_jobs=10, verbose=2)(delayed(_convert_examples_to_features)(example_index, example) \
-                                              for example_index, example in enumerate(examples))
+    outputs = Parallel(n_jobs=1, verbose=2)(delayed(_convert_examples_to_features)(example_index, example)
+                                            for example_index, example in tqdm(enumerate(examples)))
 
     features, counter_n_answers, truncated = [], collections.Counter(), []
     for (f, c, t) in outputs:
