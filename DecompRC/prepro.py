@@ -1,6 +1,7 @@
 import json
 import tokenization
 import collections
+import math
 from tqdm import tqdm
 from joblib import Parallel, delayed
 
@@ -16,13 +17,14 @@ from hotpot_evaluate_v1 import f1_score as hotpot_f1_score
 title_s = "<title>"
 title_e = "</title>"
 
-def get_dataloader(logger, args, input_file, subqueries_file, is_training, \
+
+def get_dataloader(logger, args, input_file, subqueries_file, is_training,
                    batch_size, num_epochs, tokenizer):
 
     if args.model == 'qa':
         train_examples = read_squad_examples(
-            logger=logger, input_file=input_file, subqueries_file=subqueries_file, \
-            is_training=is_training, debug=args.debug, \
+            logger=logger, input_file=input_file, subqueries_file=subqueries_file,
+            is_training=is_training, debug=args.debug,
             merge_query=args.merge_query, only_comp=args.only_comp)
     elif args.model == 'classifier':
         train_examples = read_classification_examples(
@@ -37,9 +39,9 @@ def get_dataloader(logger, args, input_file, subqueries_file, is_training, \
     return get_dataloader_given_examples(logger, args, train_examples, is_training, batch_size,
                                          num_epochs, tokenizer)
 
-def get_dataloader_given_examples(logger, args, examples, is_training, batch_size, \
+
+def get_dataloader_given_examples(logger, args, examples, is_training, batch_size,
                                   num_epochs, tokenizer):
-    num_train_steps = int(len(examples) / batch_size * num_epochs)
     if args.model == 'span-predictor':
         curr_convert_examples_to_features = span_convert_examples_to_features
     else:
@@ -52,27 +54,30 @@ def get_dataloader_given_examples(logger, args, examples, is_training, batch_siz
         max_seq_length=args.max_seq_length,
         doc_stride=args.doc_stride,
         max_query_length=args.max_query_length,
-        max_n_answers=args.max_n_answers if is_training or args.model=="span-predictor" else 1,
-        is_training=is_training and args.model!='classifier',
+        max_n_answers=args.max_n_answers if is_training or args.model == "span-predictor" else 1,
+        is_training=is_training and args.model != 'classifier',
         is_classifier=args.model.endswith("classifier"),
         force_span=args.model == "span-predictor",
         add_noise=args.add_noise)
+    total_train_batch_size = (batch_size * args.gradient_accumulation_steps * (
+        torch.distributed.get_world_size() if args.local_rank != -1 else 1))
+    num_train_steps = math.ceil(len(train_features) / total_train_batch_size) * num_epochs
 
     if is_training:
         switch_dict = collections.Counter()
         for f in train_features:
             for (s, m) in zip(f.switch, f.answer_mask):
-                if m==0: break
+                if m == 0: break
                 switch_dict[s] += 1
         print (switch_dict)
 
     logger.info("***** Running {} *****".format('training' if is_training else 'evaluation'))
-    logger.info("  Num orig examples = %d", len(examples))
-    logger.info("  Num split examples = %d", len(train_features))
-    logger.info("  Batch size = %d", batch_size)
+    logger.info("  Num orig examples = %d" % len(examples))
+    logger.info("  Num split examples = %d" % len(train_features))
+    logger.info("  Batch size = %d" % batch_size)
     if is_training:
         logger.info("  Num steps = %d", num_train_steps)
-        logger.info("  %% of tuncated_answers = %.2f%%" % \
+        logger.info("  %% of truncated_answers = %.2f%%" %
                     (100.0*n_answers_with_truncated_answers/len(train_features)))
 
     all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
@@ -90,7 +95,7 @@ def get_dataloader_given_examples(logger, args, examples, is_training, batch_siz
 
             if args.model == "qa" or 'intersec' in  args.predict_file:
                 dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
-                        all_start_positions, all_end_positions, all_switches, all_answer_mask)
+                                        all_start_positions, all_end_positions, all_switches, all_answer_mask)
             elif args.model == "span-predictor":
                 all_keyword_positions = torch.tensor([f.keyword_position for f in train_features], dtype=torch.long)
                 assert all_start_positions.size() == all_keyword_positions.size()
@@ -100,20 +105,21 @@ def get_dataloader_given_examples(logger, args, examples, is_training, batch_siz
                 raise NotImplementedError()
         elif args.model.endswith("classifier"):
             all_labels = torch.tensor([f.switch for f in train_features], dtype=torch.long)
-            dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
-                            all_labels)
-        sampler=RandomSampler(dataset)
+            dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_labels)
+        if args.local_rank == -1:
+            sampler = RandomSampler(dataset)
+        else:
+            sampler = DistributedSampler(dataset)
     else:
         all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
-        dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
-                        all_example_index)
-        sampler=SequentialSampler(dataset)
+        dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index)
+        sampler = SequentialSampler(dataset)
 
     dataloader = DataLoader(dataset, sampler=sampler, batch_size=batch_size)
     return dataloader, examples, train_features, num_train_steps
 
-def read_squad_examples(logger, input_file, subqueries_file, is_training, debug,
-                        merge_query, only_comp):
+
+def read_squad_examples(logger, input_file, subqueries_file, is_training, debug, merge_query, only_comp):
 
     def _process_sent(sent):
         if type(sent) != str:
@@ -154,24 +160,24 @@ def read_squad_examples(logger, input_file, subqueries_file, is_training, debug,
                 continue
             if not use_distant:
                 answers = [(qa['final_answers'][0], qa['final_answers'][0])]
-            elif qa['id'] in distant_supervision and len(distant_supervision[qa['id']])>0:
-                answers =  distant_supervision[qa['id']]
+            elif qa['id'] in distant_supervision and len(distant_supervision[qa['id']]) > 0:
+                answers = distant_supervision[qa['id']]
             else:
                 continue
-            assert all([len(a)==2 for a in answers])
+            assert all([len(a) == 2 for a in answers])
             for i in range(2):
                 qa1 = qa.copy()
-                if True: #subqueries_data[qa['id']]['context'] is None:
+                if True:  # subqueries_data[qa['id']]['context'] is None:
                     context = orig_context
                 else:
                     context = subqueries_data[qa['id']]['context'][i]
-                if type(context)==str:
+                if type(context) == str:
                     context = [context]
                 context = [c.replace('  ', ' ') for c in context]
 
                 qa1['answers'] = [[{'text': a[i]} for a in answers] for _ in range(len(context))]
                 qa1['question'] = subqueries_data[qa['id']]['query'][i]
-                qa1['id']  = '{}-{}'.format(qa['id'], i)
+                qa1['id'] = '{}-{}'.format(qa['id'], i)
                 qa1['final_answers'] = [a[i] for a in answers]
                 if use_distant:
                     for a in answers:
@@ -183,12 +189,11 @@ def read_squad_examples(logger, input_file, subqueries_file, is_training, debug,
         input_data = _input_data
 
     if only_comp:
-        with open('/home/sewon/data/hotpotqa/hotpot_{}_v1.json'.format( \
+        with open('/home/sewon/data/hotpotqa/hotpot_{}_v1.json'.format(
                                     'train' if is_training else 'dev_distractor'), 'r') as f:
             orig_data = json.load(f)
             id2type = {entry['_id'].split('-')[0]:entry['type'] for entry in orig_data}
             id2type.update({k+"-inv":v for k, v in id2type.items()})
-
 
     examples = []
     for entry in tqdm(input_data):
@@ -203,7 +208,7 @@ def read_squad_examples(logger, input_file, subqueries_file, is_training, debug,
         for paragraph in entry["paragraphs"]:
 
             if only_comp:
-                assert len(entry['paragraphs'])==1 and len(entry['paragraphs'][0]['qas'])==1
+                assert len(entry['paragraphs']) == 1 and len(entry['paragraphs'][0]['qas']) ==1
                 q_type = id2type[entry['paragraphs'][0]['qas'][0]['id']]
                 assert q_type in ['comparison', 'bridge']
                 if subqueries_data is not None:
@@ -214,20 +219,20 @@ def read_squad_examples(logger, input_file, subqueries_file, is_training, debug,
             context = paragraph['context']
             qas = paragraph['qas']
 
-            if type(context)==str:
+            if type(context) == str:
                 context = [context]
                 for i, qa in enumerate(qas):
                     if 'is_impossible' in qa:
-                        assert (len(qa['answers'])==0 and qa['is_impossible']) or \
-                                (len(qa['answers'])>0 and not qa['is_impossible'])
+                        assert (len(qa['answers']) == 0 and qa['is_impossible']) or \
+                                (len(qa['answers']) > 0 and not qa['is_impossible'])
                     qas[i]["answers"] = [qa["answers"]]
             try:
-                assert np.all([len(qa['answers'])==len(context) for qa in qas])
+                assert np.all([len(qa['answers']) == len(context) for qa in qas])
             except Exception:
                 from IPython import embed; embed()
                 assert False
 
-            context = [c.lower() for c  in context]
+            context = [c.lower() for c in context]
 
             doc_tokens_list, char_to_word_offset_list = [], []
             for paragraph_text in context:
@@ -250,10 +255,6 @@ def read_squad_examples(logger, input_file, subqueries_file, is_training, debug,
             for qa in qas:
                 qas_id = qa["id"]
                 question_text = qa["question"]
-                start_position = None
-                end_position = None
-                orig_answer_text = None
-                switch = 0
 
                 assert len(qa['answers']) == len(context)
                 if 'final_answers' in qa:
@@ -263,16 +264,16 @@ def read_squad_examples(logger, input_file, subqueries_file, is_training, debug,
                     for answers in qa['answers']:
                         all_answers += [a['text'] for a in answers]
 
-                if (not is_training) and len(all_answers)==0:
+                if (not is_training) and len(all_answers) == 0:
                     all_answers = ["None"]
 
-                assert len(all_answers)>0
+                assert len(all_answers) > 0
 
                 original_answers_list, start_positions_list, end_positions_list, switches_list = [], [], [], []
-                for (paragraph_text, doc_tokens, char_to_word_offset, answers) in zip( \
+                for (paragraph_text, doc_tokens, char_to_word_offset, answers) in zip(
                         context, doc_tokens_list, char_to_word_offset_list, qa['answers']):
 
-                    if len(answers)==0:
+                    if len(answers) == 0:
                         original_answers = [""]
                         start_positions, end_positions = [0], [0]
                         switches = [3]
@@ -325,7 +326,7 @@ def read_span_predictor_examples(logger, input_file, is_training, debug):
     for entry in tqdm(input_data):
         question_text = entry['question']
         id_ = entry['id']
-        #indices = entry['indices']
+        # indices = entry['indices']
 
         doc_tokens = []
         char_to_word_offset = []
@@ -397,7 +398,6 @@ def read_classification_examples(logger, input_file, is_training, debug):
         content = " ".join([sent.strip() for sent in article[1]])
         return "<title> {} </title> {}".format(_process_sent(article[0]), content).lower()
 
-
     input_file, decomposed_files = input_file.split(',', 1)
     with open(input_file, 'r') as f:
         orig_data = json.load(f)['data']
@@ -430,7 +430,7 @@ def read_classification_examples(logger, input_file, is_training, debug):
         with open('data/decomposed-predictions/{}_decomposed_{}_nbest_predictions.json'.format(
                 name, 'train' if is_training else 'dev'), 'r') as f:
             curr_output = json.load(f)
-        if name=='comparison':
+        if name == 'comparison':
             comp_keys = comp_keys & set(curr_output.keys())
         for (k, v) in curr_output.items():
             if k in comp_keys:
@@ -438,7 +438,7 @@ def read_classification_examples(logger, input_file, is_training, debug):
                     continue
                 else:
                     v = [v[0].copy()]
-            if name=='comparison' and k not in comp_keys:
+            if name == 'comparison' and k not in comp_keys:
                 continue
             nbest_output[k][name] = v
 
@@ -467,16 +467,16 @@ def read_classification_examples(logger, input_file, is_training, debug):
         f1_set = []
 
         if 'comparison' in nbest_out:
-            assert len(nbest_out)==1
+            assert len(nbest_out) == 1
             names = ['comparison']
         else:
             names = ['bridge', 'intersec', 'onehop']
-            assert set(nbest_out.keys())==set(names)
+            assert set(nbest_out.keys()) == set(names)
 
         for name in names:
             for pred in nbest_out[name][:n_each]:
                 max_f1 = max(hotpot_f1_score(pred['text'], gt)[0] for gt in groundtruth)
-                if is_training and 0.4<=max_f1<=0.6:
+                if is_training and 0.4 <= max_f1 <= 0.6:
                     continue
                 answer_set.append(("({}) {}".format(name, pred['text'])))
                 evidence = pred['evidence'].lower()
@@ -487,14 +487,14 @@ def read_classification_examples(logger, input_file, is_training, debug):
                 f1_set.append(max_f1)
                 label_set.append(int(max_f1 > 0.6))
 
-        if is_training and (len(f1_set)==0 or max(f1_set)<0.4):
+        if is_training and (len(f1_set) == 0 or max(f1_set) < 0.4):
             continue
 
-        assert len(f1_set)>0
+        assert len(f1_set) > 0
 
         j = 0
         ratio = sum(label_set)*1.0/len(label_set)
-        for i, (answer, evidence, f1, label) in enumerate(zip( \
+        for i, (answer, evidence, f1, label) in enumerate(zip(
                             answer_set, evidence_set, f1_set, label_set)):
             def put(j):
                 input_data.append({
@@ -505,7 +505,7 @@ def read_classification_examples(logger, input_file, is_training, debug):
                         'all_answers': f1,
                         'label': label})
             put(j)
-            j+=1
+            j += 1
 
     examples = []
     for entry in input_data:
@@ -527,28 +527,27 @@ def read_classification_examples(logger, input_file, is_training, debug):
                 prev_is_whitespace = False
 
         examples.append(SquadExample(
-                    qas_id=qas_id,
-                    question_text=question + " " + answer,
-                    doc_tokens=[doc_tokens],
-                    switch=[label],
-                    all_answers=entry['all_answers'],
-                    orig_answer_text=[""], start_position=[0], end_position=[0]))
+            qas_id=qas_id,
+            question_text=question + " " + answer,
+            doc_tokens=[doc_tokens],
+            switch=[label],
+            all_answers=entry['all_answers'],
+            orig_answer_text=[""],
+            start_position=[0],
+            end_position=[0]))
     return examples
+
 
 def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
                     doc_stride, max_query_length, max_n_answers,
                     is_training, is_classifier=False, force_span=False, add_noise=0):
     """Loads a data file into a list of `InputBatch`s."""
-
-
     def _convert_examples_to_features(example_index, example):
         unique_id = 1000*example_index
-
         truncated = []
         features = []
         features_with_truncated_answers = []
         counter_n_answers = collections.Counter()
-
         query_tokens = tokenizer.tokenize(example.question_text)
         if is_training and add_noise>0 and np.random.random()<add_noise*0.5:
             length = len(query_tokens)
@@ -561,44 +560,43 @@ def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
                 elif token in ['who', 'when', 'where', 'whom', 'why']:
                     keywords.append((2, i))
             drop_random = False
-            if len(keywords)>0:
+            if len(keywords) > 0:
                 key, i = sorted(keywords)[0]
-                if key==0:
+                if key == 0:
                     assert query_tokens[i] == 'what'
                     if len(query_tokens)>i+1 and query_tokens[i+1] in ['is', 'was']:
                         query_tokens = query_tokens[:i] + query_tokens[i+2:]
                     else:
                         query_tokens = query_tokens[:i] + query_tokens[i+1:]
-                elif key==1:
+                elif key == 1:
                     assert query_tokens[i] == 'which'
                     query_tokens = query_tokens[:i] + ["the"] + query_tokens[i+1:]
-                elif key==2 and query_tokens[i] == "where" and len(query_tokens)>i+1:
+                elif key == 2 and query_tokens[i] == "where" and len(query_tokens) > i+1:
                     if query_tokens[i+1] in ['did', 'do', 'does']:
                         query_tokens = query_tokens[:i] + ["the", "place"] + query_tokens[i+2:]
                     elif query_tokens[i+1] in ['was', 'is']:
                         query_tokens = query_tokens[:i] + query_tokens[i+2:]
                     else:
-                        drop_random=True
+                        drop_random = True
                 else:
-                    drop_random=True
+                    drop_random = True
             else:
-                drop_random=True
+                drop_random = True
             if drop_random:
                 i = np.random.choice(range(len(query_tokens)))
                 query_tokens = query_tokens[:i] + query_tokens[i+1:]
-        elif is_training and add_noise>0 and np.random.random()<add_noise*0.5:
+        elif is_training and add_noise > 0 and np.random.random() < add_noise*0.5:
             i = np.random.choice(range(len(query_tokens)))
             query_tokens = query_tokens[:i] + query_tokens[i+1:]
 
         if len(query_tokens) > max_query_length:
             query_tokens = query_tokens[0:max_query_length]
 
-
         assert len(example.doc_tokens) == len(example.orig_answer_text) == \
             len(example.start_position) == len(example.end_position) == len(example.switch)
 
         for (doc_tokens, original_answer_text_list, start_position_list, end_position_list, switch_list) in \
-                zip(example.doc_tokens, example.orig_answer_text, example.start_position, \
+                zip(example.doc_tokens, example.orig_answer_text, example.start_position,
                     example.end_position, example.switch):
 
             tok_to_orig_index = []
@@ -614,7 +612,7 @@ def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
             tok_start_positions = []
             tok_end_positions = []
             if is_training or force_span:
-                for (orig_answer_text, start_position, end_position) in zip( \
+                for (orig_answer_text, start_position, end_position) in zip(
                             original_answer_text_list, start_position_list, end_position_list):
                     if orig_answer_text in ['yes', 'no']:
                         tok_start_positions.append(-1)
@@ -630,12 +628,11 @@ def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
                         orig_answer_text)
                     tok_start_positions.append(tok_start_position)
                     tok_end_positions.append(tok_end_position)
-                to_be_same = [len(original_answer_text_list), \
+                to_be_same = [len(original_answer_text_list),
                                     len(start_position_list), len(end_position_list),
-                                    len(switch_list), \
+                                    len(switch_list),
                                     len(tok_start_positions), len(tok_end_positions)]
-                assert all([x==to_be_same[0] for x in to_be_same])
-
+                assert all([x == to_be_same[0] for x in to_be_same])
 
             # The -3 accounts for [CLS], [SEP] and [SEP]
             max_tokens_for_doc = max_seq_length - len(query_tokens) - 3
@@ -654,7 +651,6 @@ def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
 
             truncated.append(len(doc_spans))
 
-
             for (doc_span_index, doc_span) in enumerate(doc_spans):
                 tokens = []
                 token_to_orig_map = {}
@@ -671,9 +667,7 @@ def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
                 for i in range(doc_span.length):
                     split_token_index = doc_span.start + i
                     token_to_orig_map[len(tokens)] = tok_to_orig_index[split_token_index]
-
-                    is_max_context = _check_is_max_context(doc_spans, doc_span_index,
-                                                        split_token_index)
+                    is_max_context = _check_is_max_context(doc_spans, doc_span_index, split_token_index)
                     token_is_max_context[len(tokens)] = is_max_context
                     tokens.append(all_doc_tokens[split_token_index])
                     segment_ids.append(1)
@@ -701,9 +695,9 @@ def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
                 switches = []
                 answer_mask = []
                 if is_training or force_span:
-                    for (orig_answer_text, start_position, end_position, switch, \
-                                tok_start_position, tok_end_position) in zip(\
-                                original_answer_text_list, start_position_list, end_position_list, \
+                    for (orig_answer_text, start_position, end_position, switch,
+                                tok_start_position, tok_end_position) in zip(
+                                original_answer_text_list, start_position_list, end_position_list,
                                 switch_list, tok_start_positions, tok_end_positions):
                         if orig_answer_text not in ['yes', 'no'] or switch == 3:
                             # For training, if our document chunk does not contain an annotation
@@ -725,8 +719,8 @@ def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
                     to_be_same = [len(start_positions), len(end_positions), len(switches)]
                     assert all([x==to_be_same[0] for x in to_be_same])
                     if sum(to_be_same) == 0:
-                        #if is_training and np.random.random()<0.5:
-                        #    continue
+                        # if is_training and np.random.random()<0.5:
+                        #     continue
                         start_positions = [0]
                         end_positions = [0]
                         switches = [3]
@@ -765,12 +759,12 @@ def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
                         switch=switches,
                         answer_mask=answer_mask))
 
-
                 unique_id += 1
 
         return features, counter_n_answers, truncated
-    outputs = Parallel(n_jobs=10, verbose=2)(delayed(_convert_examples_to_features)(example_index, example) \
-                                              for example_index, example in enumerate(examples))
+    outputs = Parallel(n_jobs=1, verbose=10)(delayed(_convert_examples_to_features)(example_index, example)
+                                             for example_index, example in tqdm(enumerate(examples),
+                                                                                total=len(examples)))
 
     features, counter_n_answers, truncated = [], collections.Counter(), []
     for (f, c, t) in outputs:
@@ -778,11 +772,11 @@ def convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
         counter_n_answers.update(c)
         truncated += t
 
-
     if force_span:
         assert len([f for f in features if 3 in f.switch])==0
 
     return features, 0
+
 
 def span_convert_examples_to_features(logger, examples, tokenizer, max_seq_length,
                     doc_stride, max_query_length, max_n_answers,
@@ -790,12 +784,9 @@ def span_convert_examples_to_features(logger, examples, tokenizer, max_seq_lengt
     """Loads a data file into a list of `InputBatch`s."""
 
     unique_id = 1000000000
-
     truncated = []
     features = []
     features_with_truncated_answers = []
-
-
     for (example_index, example) in tqdm(enumerate(examples)):
 
         tok_to_orig_index = []
@@ -827,7 +818,6 @@ def span_convert_examples_to_features(logger, examples, tokenizer, max_seq_lengt
         token_to_orig_map = {}
         token_is_max_context = {}
         segment_ids = []
-
         for i in range(len(all_doc_tokens)):
             #if i+1==len(all_doc_tokens) or  tok_to_orig_index[i]<tok_to_orig_index[i+1]:
             token_to_orig_map[len(tokens)] = tok_to_orig_index[i]
@@ -851,26 +841,24 @@ def span_convert_examples_to_features(logger, examples, tokenizer, max_seq_lengt
         assert len(segment_ids) == max_seq_length
 
         features.append(InputFeatures(
-                        unique_id=unique_id,
-                        example_index=example_index,
-                        doc_span_index=0,
-                        doc_tokens=example.doc_tokens,
-                        tokens=tokens,
-                        token_to_orig_map=token_to_orig_map,
-                        token_is_max_context=token_is_max_context,
-                        input_ids=input_ids,
-                        input_mask=input_mask,
-                        segment_ids=segment_ids,
-                        start_position=[start_position],
-                        end_position=[end_position],
-                        keyword_position=[keyword_position],
-                        switch=[example.switch],
-                        answer_mask=[1]))
-        unique_id+=1
+            unique_id=unique_id,
+            example_index=example_index,
+            doc_span_index=0,
+            doc_tokens=example.doc_tokens,
+            tokens=tokens,
+            token_to_orig_map=token_to_orig_map,
+            token_is_max_context=token_is_max_context,
+            input_ids=input_ids,
+            input_mask=input_mask,
+            segment_ids=segment_ids,
+            start_position=[start_position],
+            end_position=[end_position],
+            keyword_position=[keyword_position],
+            switch=[example.switch],
+            answer_mask=[1]))
+        unique_id += 1
 
     return features, 0
-
-
 
 
 def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer,
@@ -878,14 +866,13 @@ def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer,
     """Returns tokenized answer spans that better match the annotated answer."""
 
     tok_answer_text = " ".join(tokenizer.tokenize(orig_answer_text))
-
     for new_start in range(input_start, input_end + 1):
         for new_end in range(input_end, new_start - 1, -1):
             text_span = " ".join(doc_tokens[new_start:(new_end + 1)])
             if text_span == tok_answer_text:
-                return (new_start, new_end)
+                return new_start, new_end
+    return input_start, input_end
 
-    return (input_start, input_end)
 
 def _check_is_max_context(doc_spans, cur_span_index, position):
     """Check if this is the 'max context' doc span for the token."""

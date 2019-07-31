@@ -151,7 +151,8 @@ def load_hotpot(args, data_type, only_bridge=False, only_comparison=False,
                     'question': question,
                     'answers': answers_list,
                     'id': article['_id'],
-                    'type': article['type']
+                    'type': article['type'],
+                    'level': article['level']
                 }]
             }
         data_list.append({'title': '', 'paragraphs': [paragraph]})

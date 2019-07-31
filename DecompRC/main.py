@@ -18,15 +18,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import sys
 import argparse
 import collections
 import logging
 import json
-import math
 import os
 import random
-import six
 from tqdm import tqdm, trange
 
 import numpy as np
@@ -47,32 +44,32 @@ logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(messa
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-RawResult = collections.namedtuple("RawResult",
-                                   ["unique_id", "start_logits", "end_logits", "switch"])
+RawResult = collections.namedtuple("RawResult", ["unique_id", "start_logits", "end_logits", "switch"])
 
 
 def main():
     parser = argparse.ArgumentParser()
-    BERT_DIR = "/home/sewon/for-inference/model/uncased_L-12_H-768_A-12/"
+    BERT_DIR = "model/uncased_L-12_H-768_A-12/"
     ## Required parameters
-    parser.add_argument("--bert_config_file", default=BERT_DIR+"bert_config.json", \
+    parser.add_argument("--bert_config_file", default=BERT_DIR+"bert_config.json",
                         type=str, help="The config json file corresponding to the pre-trained BERT model. "
-                             "This specifies the model architecture.")
-    parser.add_argument("--vocab_file", default=BERT_DIR+"vocab.txt", type=str, \
+                                       "This specifies the model architecture.")
+    parser.add_argument("--vocab_file", default=BERT_DIR+"vocab.txt", type=str,
                         help="The vocabulary file that the BERT model was trained on.")
-    parser.add_argument("--output_dir", default="out", type=str, \
+    parser.add_argument("--output_dir", default="out", type=str,
                         help="The output directory where the model checkpoints will be written.")
 
     ## Other parameters
-    parser.add_argument("--train_file", type=str, \
-                        help="SQuAD json for training. E.g., train-v1.1.json", \
+    parser.add_argument("--train_file", type=str,
+                        help="SQuAD json for training. E.g., train-v1.1.json",
                         default="")
     parser.add_argument("--predict_file", type=str,
-                        help="SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json", \
+                        help="SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json",
                         default="")
     parser.add_argument("--init_checkpoint", type=str,
-                        help="Initial checkpoint (usually from a pre-trained BERT model).", \
+                        help="Initial checkpoint (usually from a pre-trained BERT model).",
                         default=BERT_DIR+"pytorch_model.bin")
     parser.add_argument("--do_lower_case", default=True, action='store_true',
                         help="Whether to lower case the input text. Should be True for uncased "
@@ -88,7 +85,7 @@ def main():
     parser.add_argument("--do_train", default=False, action='store_true', help="Whether to run training.")
     parser.add_argument("--do_predict", default=False, action='store_true', help="Whether to run eval on the dev set.")
     parser.add_argument("--train_batch_size", default=32, type=int, help="Total batch size for training.")
-    parser.add_argument("--predict_batch_size", default=128, type=int, help="Total batch size for predictions.")
+    parser.add_argument("--predict_batch_size", default=None, type=int, help="Total batch size for training.")
     parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
     parser.add_argument("--num_train_epochs", default=10.0, type=float,
                         help="Total number of training epochs to perform.")
@@ -111,11 +108,11 @@ def main():
                              "A number of warnings are expected for a normal SQuAD evaluation.")
     parser.add_argument("--no_cuda", default=False, action='store_true', help="Whether not to use CUDA when available")
     parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
-    parser.add_argument("--accumulate_gradients", type=int, default=1, help="Number of steps to accumulate gradient on (divide the batch_size and accumulate)")
     parser.add_argument('--seed', type=int, default=42, help="random seed for initialization")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
-                        help="Number of updates steps to accumualte before performing a backward/update pass.")
-    parser.add_argument('--eval_period', type=int, default=2000)
+                        help="Number of updates steps to accumulate before performing a backward/update pass.")
+    # parser.add_argument('--eval_period', type=int, default=2000)
+    parser.add_argument('--eval_freq', type=int, default=4)
 
     parser.add_argument('--max_n_answers', type=int, default=5)
     parser.add_argument('--merge_query', type=int, default=-1)
@@ -124,11 +121,11 @@ def main():
 
     parser.add_argument('--only_comp', action="store_true", default=False)
 
-    parser.add_argument('--train_subqueries_file', type=str, default="") #500
-    parser.add_argument('--predict_subqueries_file', type=str, default="") #500
-    parser.add_argument('--prefix', type=str, default="") #500
+    parser.add_argument('--train_subqueries_file', type=str, default="")  # 500
+    parser.add_argument('--predict_subqueries_file', type=str, default="")  # 500
+    parser.add_argument('--prefix', type=str, default="")  # 500
 
-    parser.add_argument('--model', type=str, default="qa") #500
+    parser.add_argument('--model', type=str, default="qa")  # 500
     parser.add_argument('--pooling', type=str, default="max")
     parser.add_argument('--debug', action="store_true", default=False)
     parser.add_argument('--output_dropout_prob', type=float, default=0)
@@ -136,29 +133,33 @@ def main():
     parser.add_argument('--with_key', action="store_true", default=False)
     parser.add_argument('--add_noise', action="store_true", default=False)
 
-
     args = parser.parse_args()
+
+    logger.info('Local Rank %d' % args.local_rank)
 
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-        n_gpu = torch.cuda.device_count()
+        args.n_gpu = torch.cuda.device_count()
     else:
+        torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
-        n_gpu = 1
+        args.n_gpu = 1
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.distributed.init_process_group(backend='nccl')
-    logger.info("device %s n_gpu %d distributed training %r", device, n_gpu, bool(args.local_rank != -1))
+    logger.info("device %s args.n_gpu %d distributed training %r", device, args.n_gpu, bool(args.local_rank != -1))
 
-    if args.accumulate_gradients < 1:
-        raise ValueError("Invalid accumulate_gradients parameter: {}, should be >= 1".format(
-                            args.accumulate_gradients))
+    if args.gradient_accumulation_steps < 1:
+        raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
+                         args.gradient_accumulation_steps))
 
-    args.train_batch_size = int(args.train_batch_size / args.accumulate_gradients)
+    args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps * max(1, args.n_gpu)
+    if args.predict_batch_size is None:
+        args.predict_batch_size = args.train_batch_size * 2
 
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if n_gpu > 0:
+    if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
     if not args.do_train and not args.do_predict:
@@ -190,57 +191,36 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir, exist_ok=True)
 
-    tokenizer = tokenization.FullTokenizer(
-        vocab_file=args.vocab_file, do_lower_case=args.do_lower_case)
+    metric_name = "Accuracy" if args.model == "span-predictor" else "F1"
 
-    train_examples = None
-    num_train_steps = None
-
-    eval_dataloader, eval_examples, eval_features, _ = get_dataloader(
-                logger=logger, args=args,
-                input_file=args.predict_file,
-                subqueries_file=args.predict_subqueries_file,
-                is_training=False,
-                batch_size=args.predict_batch_size,
-                num_epochs=1,
-                tokenizer=tokenizer)
-    if args.do_train:
-        train_dataloader, train_examples, _, num_train_steps = get_dataloader(
-                logger=logger, args=args, \
-                input_file=args.train_file, \
-                subqueries_file=args.train_subqueries_file, \
-                is_training=True,
-                batch_size=args.train_batch_size,
-                num_epochs=args.num_train_epochs,
-                tokenizer=tokenizer)
-
-    #a = input()
+    if args.local_rank not in [-1, 0]:
+        torch.distributed.barrier()  # Ensure only first process in distributed training will download model & vocab
+    print('Local Rank:', args.local_rank)
+    tokenizer = tokenization.FullTokenizer(vocab_file=args.vocab_file, do_lower_case=args.do_lower_case)
     if args.model == 'qa':
         model = BertForQuestionAnswering(bert_config, 4)
-        metric_name = "F1"
     elif args.model == 'classifier':
         if args.reduce_layers != -1:
             bert_config.num_hidden_layers = args.reduce_layers
         model = BertClassifier(bert_config, 2, args.pooling)
-        metric_name = "F1"
     elif args.model == "span-predictor":
         if args.reduce_layers != -1:
             bert_config.num_hidden_layers = args.reduce_layers
         if args.with_key:
-             Model= BertForQuestionAnsweringWithKeyword
+            Model= BertForQuestionAnsweringWithKeyword
         else:
             Model = BertForQuestionAnswering
         model = Model(bert_config, 2)
-        metric_name = "Accuracy"
     else:
         raise NotImplementedError()
+    if args.local_rank == 0:
+        torch.distributed.barrier()
 
-    if args.init_checkpoint is not None and args.do_predict and \
-                len(args.init_checkpoint.split(','))>1:
+    if args.init_checkpoint is not None and args.do_predict and (len(args.init_checkpoint.split(',')) > 1):
         assert args.model == "qa"
         model = [model]
         for i, checkpoint in enumerate(args.init_checkpoint.split(',')):
-            if i>0:
+            if i > 0:
                 model.append(BertForQuestionAnswering(bert_config, 4))
             print ("Loading from", checkpoint)
             state_dict = torch.load(checkpoint, map_location='cpu')
@@ -254,9 +234,9 @@ def main():
             print ("Loading from", args.init_checkpoint)
             state_dict = torch.load(args.init_checkpoint, map_location='cpu')
             if args.reduce_layers != -1:
-                state_dict = {k:v for k, v in state_dict.items() \
-                    if not '.'.join(k.split('.')[:3]) in \
-                    ['encoder.layer.{}'.format(i) for i in range(args.reduce_layers, 12)]}
+                state_dict = {k: v for k, v in state_dict.items()
+                              if not '.'.join(k.split('.')[:3]) in
+                                     ['encoder.layer.{}'.format(i) for i in range(args.reduce_layers, 12)]}
             if args.do_predict:
                 filter = lambda x: x[7:] if x.startswith('module.') else x
                 state_dict = {filter(k):v for (k,v) in state_dict.items()}
@@ -272,12 +252,32 @@ def main():
         model.to(device)
 
         if args.local_rank != -1:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank],
-                                                            output_device=args.local_rank)
-        elif n_gpu > 1:
+            model = torch.nn.parallel.DistributedDataParallel(model,
+                                                              device_ids=[args.local_rank],
+                                                              output_device=args.local_rank,
+                                                              find_unused_parameters=True)
+        elif args.n_gpu > 1:
             model = torch.nn.DataParallel(model)
 
+    eval_dataloader, eval_examples, eval_features, _ = get_dataloader(
+                logger=logger, args=args,
+                input_file=args.predict_file,
+                subqueries_file=args.predict_subqueries_file,
+                is_training=False,
+                batch_size=args.predict_batch_size,
+                num_epochs=1,
+                tokenizer=tokenizer)
     if args.do_train:
+        train_dataloader, train_examples, _, num_train_steps = get_dataloader(
+                logger=logger, args=args,
+                input_file=args.train_file,
+                subqueries_file=args.train_subqueries_file,
+                is_training=True,
+                batch_size=args.train_batch_size,
+                num_epochs=args.num_train_epochs,
+                tokenizer=tokenizer)
+        args.eval_period = len(train_dataloader) // args.eval_freq
+
         no_decay = ['bias', 'gamma', 'beta']
         optimizer_parameters = [
             {'params': [p for n, p in model.named_parameters() if n not in no_decay], 'weight_decay_rate': 0.01},
@@ -285,11 +285,22 @@ def main():
             ]
 
         optimizer = BERTAdam(optimizer_parameters,
-                            lr=args.learning_rate,
-                            warmup=args.warmup_proportion,
-                            t_total=num_train_steps)
+                             lr=args.learning_rate,
+                             warmup=args.warmup_proportion,
+                             t_total=num_train_steps)
 
-        global_step = 0
+        # Train!
+        logger.info("***** Running training *****")
+        logger.info("  Num Epochs = %d", args.num_train_epochs)
+        logger.info("  Eval Period = %d", args.eval_period)
+        logger.info("  args.train_batch_size = %d", args.train_batch_size)
+        logger.info("  World Size = %d", torch.distributed.get_world_size() if args.local_rank != -1 else 1)
+        logger.info("  args.n_gpu = %d", args.n_gpu)
+        logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d",
+                    args.train_batch_size * args.gradient_accumulation_steps * (torch.distributed.get_world_size()
+                                                                                if args.local_rank != -1 else 1))
+        logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
+        logger.info("  Total optimization steps = %d", num_train_steps)
 
         best_f1 = 0
         wait_step = 0
@@ -297,30 +308,37 @@ def main():
         global_step = 0
         stop_training = False
 
-        for epoch in range(int(args.num_train_epochs)):
-            for step, batch in tqdm(enumerate(train_dataloader)):
+        for epoch in trange(int(args.num_train_epochs), desc="\nEpoch", disable=args.local_rank not in [-1, 0]):
+            tr_loss = 0
+            tqdm_bar = tqdm(train_dataloader, desc="Training", disable=args.local_rank not in [-1, 0])
+            for step, batch in enumerate(tqdm_bar):
                 global_step += 1
-                batch = [t.to(device) for t in batch]
+                if args.n_gpu == 1:
+                    batch = [t.to(device) for t in batch]  # multi-gpu does scattering it-self
                 loss = model(batch, global_step)
-                if n_gpu > 1:
-                    loss = loss.mean() # mean() to average on multi-gpu.
+                if args.n_gpu > 1:
+                    loss = loss.mean()  # mean() to average on multi-gpu.
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
                 loss.backward()
+                tr_loss += loss.item()
                 if global_step % args.gradient_accumulation_steps == 0:
-                    optimizer.step()    # We have accumulated enought gradients
+                    optimizer.step()    # We have accumulated enough gradients
                     model.zero_grad()
+                    tqdm_bar.desc = "Epoch training loss: {:.2e} lr: {:.2e}".format(tr_loss / (step + 1),
+                                                                                    optimizer.get_lr()[0])
                 if global_step % args.eval_period == 0:
                     model.eval()
-                    f1 =  predict(args, model, eval_dataloader, eval_examples, eval_features, \
-                                  device, write_prediction=False)
+                    f1 = predict(args, model, eval_dataloader, eval_examples, eval_features,
+                                 device, write_prediction=False)
                     logger.info("%s: %.3f on epoch=%d" % (metric_name, f1*100.0, epoch))
                     if best_f1 < f1:
-                        logger.info("Saving model with best %s: %.3f -> %.3f on epoch=%d" % \
-                                (metric_name, best_f1*100.0, f1*100.0, epoch))
-                        model_state_dict = {k:v.cpu() for (k, v) in model.state_dict().items()}
-                        torch.save(model_state_dict, os.path.join(args.output_dir, "best-model.pt"))
-                        model = model.cuda()
+                        if args.local_rank == -1 or torch.distributed.get_rank() == 0:
+                            logger.info("Saving model with best %s: %.3f -> %.3f on epoch=%d" %
+                                        (metric_name, best_f1*100.0, f1*100.0, epoch))
+                            model_state_dict = {k: v.cpu() for (k, v) in model.state_dict().items()}
+                            torch.save(model_state_dict, os.path.join(args.output_dir, "best-model.pt"))
+                        model.to(device)
                         best_f1 = f1
                         wait_step = 0
                         stop_training = False
@@ -329,11 +347,13 @@ def main():
                         if best_f1 > 0.1 and wait_step == args.wait_step:
                             stop_training = True
                     model.train()
+            logger.info("Training loss %.5f (epoch=%d)" % (tr_loss / (step + 1), epoch))
+            logger.info("Best %s: %.3f up to epoch=%d" % (metric_name, best_f1*100.0, epoch))
             if stop_training:
                 break
 
     elif args.do_predict:
-        if type(model)==list:
+        if type(model) == list:
             model = [m.eval() for m in model]
         else:
             model.eval()
@@ -341,8 +361,7 @@ def main():
         logger.info("Final %s score: %.3f%%" % (metric_name, f1*100.0))
 
 
-def predict(args, model, eval_dataloader, eval_examples, eval_features, device, \
-            write_prediction=True):
+def predict(args, model, eval_dataloader, eval_examples, eval_features, device, write_prediction=True):
     all_results = []
 
     assert args.model == "qa" or type(model) != list
@@ -354,7 +373,7 @@ def predict(args, model, eval_dataloader, eval_examples, eval_features, device, 
 
         def _get_raw_results(model1):
             raw_results = []
-            for batch in tqdm(eval_dataloader, desc="Evaluating"):
+            for batch in tqdm(eval_dataloader, desc="Evaluating", disable=args.local_rank not in [-1, 0]):
                 example_indices = batch[-1]
                 batch_to_feed = [t.to(device) for t in batch[:-1]]
                 with torch.no_grad():
@@ -367,9 +386,9 @@ def predict(args, model, eval_dataloader, eval_examples, eval_features, device, 
                     eval_feature = eval_features[example_index.item()]
                     unique_id = int(eval_feature.unique_id)
                     raw_results.append(RawResult(unique_id=unique_id,
-                                                start_logits=start_logits,
-                                                end_logits=end_logits,
-                                                switch=switch))
+                                                 start_logits=start_logits,
+                                                 end_logits=end_logits,
+                                                 switch=switch))
             return raw_results
         if type(model)==list:
             all_raw_results = [_get_raw_results(m) for m in model]
@@ -386,25 +405,24 @@ def predict(args, model, eval_dataloader, eval_examples, eval_features, device, 
         else:
             all_results = _get_raw_results(model)
 
-
         output_prediction_file = os.path.join(args.output_dir, args.prefix+"predictions.json")
         output_nbest_file = os.path.join(args.output_dir, args.prefix+"nbest_predictions.json")
 
         f1 = write_predictions(logger, eval_examples, eval_features, all_results,
-                        args.n_best_size if write_prediction else 1,
-                        args.max_answer_length,
-                        args.do_lower_case,
-                        output_prediction_file if write_prediction else None,
-                        output_nbest_file if write_prediction else None,
-                        args.verbose_logging,
-                        write_prediction=write_prediction)
+                               args.n_best_size if write_prediction else 1,
+                               args.max_answer_length,
+                               args.do_lower_case,
+                               output_prediction_file if write_prediction else None,
+                               output_nbest_file if write_prediction else None,
+                               args.verbose_logging,
+                               write_prediction=write_prediction)
         return f1
 
-    elif args.model=='classifier':
+    elif args.model == 'classifier':
 
         all_results = collections.defaultdict(list)
         all_results_per_key = collections.defaultdict(list)
-        for batch in tqdm(eval_dataloader, desc="Evaluating"):
+        for batch in tqdm(eval_dataloader, desc="Evaluating", disable=args.local_rank not in [-1, 0]):
             example_indices = batch[-1]
             batch_to_feed = tuple(t.to(device) for t in batch[:-1])
             with torch.no_grad():
@@ -426,8 +444,8 @@ def predict(args, model, eval_dataloader, eval_examples, eval_features, device, 
                 logit[1] += logit_[1]
                 assert switch == switch_ and f1 == f1_
             logit_indicator = (np.exp(logit)/sum(np.exp(logit))).tolist()[1]
-            #logit_indicator = logit[1]/np.linalg.norm(logit) #/len(results)
-            assert len(switch)==1 #and switch[0] == int(f1>0.6)
+            # logit_indicator = logit[1]/np.linalg.norm(logit) #/len(results)
+            assert len(switch) == 1  # and switch[0] == int(f1>0.6)
             all_results_per_key[example_index_].append(( \
                             logit_indicator, f1, int(sent_index), results[0][3]))
         accs = {}
@@ -486,7 +504,7 @@ def predict(args, model, eval_dataloader, eval_examples, eval_features, device, 
                             for (k, key) in enumerate(keyword_logits[i:i+j+1]):
                                 scores.append(((i, i+j, i+k), s+e+key))
                     scores = sorted(scores, key=lambda x: x[1], reverse=True)
-                    acc = scores[0][0] in [(s, e, key) for (s, e, key) in \
+                    acc = scores[0][0] in [(s, e, key) for (s, e, key) in
                             zip(gold_start_positions, gold_end_positions, gold_keyword_positions)]
                 else:
                     start_logits = start_logits[:len(eval_feature.tokens)]
@@ -500,9 +518,9 @@ def predict(args, model, eval_dataloader, eval_examples, eval_features, device, 
 
                 em_all_results[eval_feature.example_index].append((unique_id, acc))
                 all_results.append(RawResult(unique_id=unique_id,
-                                            start_logits=start_logits,
-                                            end_logits=end_logits,
-                                            keyword_logits=keyword_logits,
+                                             start_logits=start_logits,
+                                             end_logits=end_logits,
+                                             keyword_logits=keyword_logits,
                                              switch=switch))
 
         output_prediction_file = os.path.join(args.output_dir, args.prefix+"predictions.json")
@@ -512,7 +530,6 @@ def predict(args, model, eval_dataloader, eval_examples, eval_features, device, 
             acc = sorted(results, key=lambda x: x[0])[0][1]
             accs.append(acc)
 
-
         if write_prediction:
             is_bridge = 'bridge' in args.predict_file
             is_intersec = 'intersec' in args.predict_file
@@ -520,15 +537,15 @@ def predict(args, model, eval_dataloader, eval_examples, eval_features, device, 
 
             print ("Accuracy", np.mean(accs))
             f1 = span_write_predictions(logger, eval_examples, eval_features, all_results,
-                        args.n_best_size if write_prediction else 1,
-                        args.max_answer_length,
-                        args.do_lower_case,
-                        output_prediction_file if write_prediction else None,
-                        output_nbest_file if write_prediction else None,
-                        args.verbose_logging,
-                        write_prediction=write_prediction,
-                        with_key=args.with_key,
-                        is_bridge=is_bridge)
+                                        args.n_best_size if write_prediction else 1,
+                                        args.max_answer_length,
+                                        args.do_lower_case,
+                                        output_prediction_file if write_prediction else None,
+                                        output_nbest_file if write_prediction else None,
+                                        args.verbose_logging,
+                                        write_prediction=write_prediction,
+                                        with_key=args.with_key,
+                                        is_bridge=is_bridge)
 
         return np.mean(accs)
 
