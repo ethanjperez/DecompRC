@@ -14,7 +14,7 @@ def f1(pred, a):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_file", default="/home/sewon/data/hotpotqa/hotpot_dev_distractor_v1.json")
+    parser.add_argument("--data_file", default="data/hotpotqa/hotpot_dev_distractor_v1.json")
     parser.add_argument("--prediction_file", default="final_predictions.json")
     args = parser.parse_args()
     np.random.seed(1995)

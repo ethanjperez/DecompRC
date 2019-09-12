@@ -471,7 +471,8 @@ def predict(args, model, eval_dataloader, eval_examples, eval_features, device, 
         has_keyword = args.with_key
         em_all_results = collections.defaultdict(list)
         accs = []
-        for batch in eval_dataloader:
+        print('Predicting spans...')
+        for batch in tqdm(eval_dataloader):
             example_indices = batch[-1]
             batch_to_feed = [t.to(device) for t in batch[:-1]]
             with torch.no_grad():
@@ -525,8 +526,8 @@ def predict(args, model, eval_dataloader, eval_examples, eval_features, device, 
 
         output_prediction_file = os.path.join(args.output_dir, args.prefix+"predictions.json")
         output_nbest_file = os.path.join(args.output_dir, args.prefix+"nbest_predictions.json")
-
-        for example_index, results in em_all_results.items():
+        print('Sorting results...')
+        for example_index, results in tqdm(em_all_results.items()):
             acc = sorted(results, key=lambda x: x[0])[0][1]
             accs.append(acc)
 

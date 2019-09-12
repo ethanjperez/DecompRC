@@ -5,6 +5,7 @@ import math
 import six
 import numpy as np
 import tokenization
+from tqdm import tqdm
 from collections import defaultdict
 
 from hotpot_evaluate_v1 import normalize_answer, f1_score
@@ -21,7 +22,7 @@ def write_predictions(logger, all_examples, all_features, all_results, n_best_si
                      with_key=False, is_bridge=True):
 
     """Write final predictions to the json file."""
-
+    print('write_predictions')
     example_index_to_features = collections.defaultdict(list)
     for feature in all_features:
         example_index_to_features[feature.example_index].append(feature)
@@ -37,7 +38,7 @@ def write_predictions(logger, all_examples, all_features, all_results, n_best_si
     all_predictions = collections.OrderedDict()
     all_nbest_json = collections.OrderedDict()
 
-    for (example_index, example) in enumerate(all_examples):
+    for (example_index, example) in enumerate(tqdm(all_examples)):
         features = example_index_to_features[example_index]
 
         prelim_predictions = []
